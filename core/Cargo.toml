@@ -1,0 +1,27 @@
+[package]
+name = "keyfinder-core"
+version = "0.1.0"
+edition = "2021"
+description = "Realtime-safe musical key detection core for the KeyFinder Logic Pro plugin"
+
+[lib]
+name = "keyfinder_core"
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = []
+cli = ["dep:hound"]
+
+[dependencies]
+realfft = "3.5"
+hound = { version = "3.5", optional = true }
+
+[[bin]]
+name = "keyfind"
+required-features = ["cli"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

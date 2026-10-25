@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --release --all-targets --features cli -- -D warnings
+        working-directory: core
+      - run: make test
+
+  plugin:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: brew install xcodegen
+      - run: make core project
+      - run: >
+          xcodebuild -project plugin/KeyFinder.xcodeproj -scheme KeyFinder
+          -configuration Release -derivedDataPath plugin/build
+          CODE_SIGNING_ALLOWED=NO build
+      - run: make smoke

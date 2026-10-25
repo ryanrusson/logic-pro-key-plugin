@@ -1,0 +1,91 @@
+# XcodeGen spec: `make project` generates plugin/KeyFinder.xcodeproj.
+name: KeyFinder
+options:
+  bundleIdPrefix: com.ryanrusson
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    # Signs to run locally. Set DEVELOPMENT_TEAM for distribution builds.
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  KeyFinder:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/App
+      - Sources/Shared
+    dependencies:
+      - target: KeyFinderAU
+      - framework: ../core/build/KeyFinderCore.xcframework
+        embed: false
+    info:
+      path: Generated/App-Info.plist
+      properties:
+        CFBundleDisplayName: KeyFinder
+        LSApplicationCategoryType: public.app-category.music
+        LSMinimumSystemVersion: "13.0"
+    entitlements:
+      path: Generated/App.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-only: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ryanrusson.keyfinder
+
+  KeyFinderAU:
+    type: app-extension
+    platform: macOS
+    sources:
+      - Sources/AudioUnit
+      - Sources/Shared
+    dependencies:
+      - framework: ../core/build/KeyFinderCore.xcframework
+        embed: false
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreAudioKit.framework
+    info:
+      path: Generated/AU-Info.plist
+      properties:
+        CFBundleDisplayName: KeyFinder
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.AudioUnit-UI
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).AudioUnitViewController
+          NSExtensionAttributes:
+            AudioComponents:
+              - name: "KeyFinder: Key Detector"
+                description: Detects the musical key of the track it is inserted on
+                manufacturer: KyFn
+                type: aufx
+                subtype: kyDt
+                version: 65536
+                sandboxSafe: true
+                tags: [Effects]
+    entitlements:
+      path: Generated/AU.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-only: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ryanrusson.keyfinder.audiounit
+        PRODUCT_NAME: KeyFinderAU
+
+schemes:
+  KeyFinder:
+    build:
+      targets:
+        KeyFinder: all
+        KeyFinderAU: all
+    run:
+      config: Debug

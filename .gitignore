@@ -1,0 +1,8 @@
+/core/target/
+/core/build/
+/plugin/*.xcodeproj/
+/plugin/build/
+.DS_Store
+xcuserdata/
+DerivedData/
+/plugin/Generated/

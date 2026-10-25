@@ -1,0 +1,4 @@
+module KeyFinderCore {
+    header "keyfinder.h"
+    export *
+}
