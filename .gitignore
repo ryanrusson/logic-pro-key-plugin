@@ -6,3 +6,4 @@
 xcuserdata/
 DerivedData/
 /plugin/Generated/
+__pycache__/

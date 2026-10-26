@@ -15,7 +15,7 @@ enum {
     KF_MODE_BASS = 0,     // isolated bass / bass stem
     KF_MODE_GUITAR = 1,   // isolated guitar / "other" stem
     KF_MODE_FULL_MIX = 2, // full mix, vocals
-    KF_MODE_AUTO = 3,     // most confident of the above (query only)
+    KF_MODE_AUTO = 3,     // the above combined (query only)
 };
 
 // All modes are analysed simultaneously; `mode` only selects which result
@@ -24,7 +24,7 @@ enum {
 typedef struct {
     int32_t tonic;    // pitch class, 0 = C
     int32_t is_minor;
-    float score;      // profile correlation, -1..1
+    float score;      // posterior probability, 0..1
 } KFKeyCandidate;
 
 typedef struct {
@@ -32,7 +32,7 @@ typedef struct {
     uint32_t mode;          // mode the result came from
     int32_t tonic;
     int32_t is_minor;
-    float confidence;       // 0..1
+    float confidence;       // 0..1, chance the key is right
     float tuning_cents;     // deviation from A440, -50..50
     float tonality;         // 0..1, how pitched the material is
     float seconds_analyzed;
@@ -51,11 +51,15 @@ size_t kf_analyzer_push(const KFAnalyzer *a, const float *left, const float *rig
 // Background thread: drain buffered audio and update the analysis.
 size_t kf_analyzer_process(const KFAnalyzer *a);
 
+// Offline (file) analysis only, once after the last push: drains the buffer
+// and analyses a clip too short to fill one analysis frame (~1.5 s).
+void kf_analyzer_finish(const KFAnalyzer *a);
+
 // Any non-realtime thread. Returns has_key.
 int32_t kf_analyzer_result(const KFAnalyzer *a, uint32_t mode, KFKeyResult *out);
 
-// Applied on the next kf_analyzer_process. sample_rate <= 0 keeps the
-// current rate.
+// Applied on the next kf_analyzer_process. A sample_rate outside
+// 8 kHz..768 kHz (e.g. <= 0) keeps the current rate.
 void kf_analyzer_reset(const KFAnalyzer *a, double sample_rate);
 void kf_analyzer_set_listening(const KFAnalyzer *a, int32_t on);
 uint64_t kf_analyzer_dropped_samples(const KFAnalyzer *a);

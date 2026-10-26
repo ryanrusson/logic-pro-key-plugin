@@ -15,7 +15,7 @@ const RING_CAPACITY: usize = 1 << 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Selection {
     Mode(SourceMode),
-    /// Whichever mode is most confident.
+    /// All modes combined (see `key::combine`).
     Auto,
 }
 
@@ -60,11 +60,18 @@ impl Engine {
         self.spectrum.process(&self.scratch_out, |f| modes.iter_mut().for_each(|m| m.add_frame(f)));
     }
 
+    /// End of input (offline analysis only): analyses a clip too short to
+    /// fill one frame.
+    pub fn finish(&mut self) {
+        let modes = &mut self.modes;
+        self.spectrum.finish(|f| modes.iter_mut().for_each(|m| m.add_frame(f)));
+    }
+
     fn snapshot_mode(&self, h: &PitchHistogram) -> Snapshot {
         let chroma = h.chroma();
         Snapshot {
             mode: h.mode(),
-            estimate: key::estimate(&chroma, h.tonality()),
+            estimate: key::estimate(&chroma, h.tonality(), h.mode()),
             chroma,
             tuning_cents: h.tuning() * 100.0,
             tonality: h.tonality(),
@@ -77,12 +84,17 @@ impl Engine {
         match sel {
             Selection::Mode(m) => self.snapshot_mode(&self.modes[m as usize]),
             Selection::Auto => {
-                let conf = |s: &Snapshot| s.estimate.as_ref().map_or(-1.0, |e| e.confidence);
-                self.modes
-                    .iter()
-                    .map(|h| self.snapshot_mode(h))
-                    .reduce(|best, s| if conf(&s) > conf(&best) { s } else { best })
-                    .expect("three modes")
+                let snaps = self.modes.each_ref().map(|h| self.snapshot_mode(h));
+                let parts: Vec<_> = snaps.iter().filter_map(|s| Some((s.estimate.as_ref()?, s.tonality))).collect();
+                let Some(combined) = key::combine(&parts) else {
+                    return snaps.into_iter().next().expect("three modes");
+                };
+                // Report the mode that most supports the combined winner.
+                let winner = combined.ranked[0].key.index();
+                let support = |s: &Snapshot| s.estimate.as_ref().map_or(-1.0, |e| e.posterior[winner]);
+                let mut best = snaps.into_iter().reduce(|a, b| if support(&b) > support(&a) { b } else { a }).expect("three modes");
+                best.estimate = Some(combined);
+                best
             }
         }
     }
@@ -125,8 +137,11 @@ impl Analyzer {
     }
 
     /// Realtime-safe. Downmixes to mono into the ring buffer.
+    ///
+    /// # Safety
+    /// Single producer: never call `push` from two threads at once.
     #[inline]
-    pub fn push(&self, left: &[f32], right: Option<&[f32]>) -> usize {
+    pub unsafe fn push(&self, left: &[f32], right: Option<&[f32]>) -> usize {
         if !self.listening.load(Ordering::Relaxed) {
             return 0;
         }
@@ -166,6 +181,13 @@ impl Analyzer {
         n
     }
 
+    /// End of input for offline (file) analysis: drains the ring, then
+    /// `Engine::finish`. Not for live input, where more audio may follow.
+    pub fn finish(&self) {
+        self.process();
+        self.engine.lock().unwrap_or_else(|e| e.into_inner()).finish();
+    }
+
     pub fn snapshot(&self, sel: Selection) -> Snapshot {
         self.engine.lock().unwrap_or_else(|e| e.into_inner()).snapshot(sel)
     }
@@ -181,5 +203,6 @@ pub fn analyze_buffer(mono: &[f32], sample_rate: f64, sel: Selection) -> Snapsho
     for chunk in mono.chunks(1 << 16) {
         e.feed(chunk);
     }
+    e.finish();
     e.snapshot(sel)
 }

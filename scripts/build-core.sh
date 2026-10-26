@@ -16,6 +16,12 @@ LIBS=()
 for t in "${TARGETS[@]}"; do LIBS+=("target/$t/release/libkeyfinder_core.a"); done
 lipo -create "${LIBS[@]}" -output build/universal/libkeyfinder_core.a
 cp include/keyfinder.h include/module.modulemap build/headers/
+# The XCFramework is only needed by the Xcode build; with just the Command
+# Line Tools (scripts/build-plugin-clt.sh) the universal library is enough.
+if ! xcodebuild -version >/dev/null 2>&1; then
+    echo "Built core/build/universal/libkeyfinder_core.a (no Xcode, skipped the XCFramework)"
+    exit 0
+fi
 xcodebuild -create-xcframework \
     -library build/universal/libkeyfinder_core.a -headers build/headers \
     -output build/KeyFinderCore.xcframework

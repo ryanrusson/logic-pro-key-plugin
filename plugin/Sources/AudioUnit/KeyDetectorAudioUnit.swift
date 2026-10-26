@@ -3,14 +3,22 @@ import AVFoundation
 import KeyFinderCore
 
 /// Pass-through audio effect that listens to its track and estimates the key.
-/// Audio is untouched; the render block only copies samples into the Rust
-/// core's wait-free ring buffer.
-public final class KeyDetectorAudioUnit: AUAudioUnit {
+/// Audio is untouched; the render block (RenderBlock.m) only copies samples
+/// into the Rust core's wait-free ring buffer.
+public final class KeyDetectorAudioUnit: KFAudioUnitBase {
     let engine: AnalysisEngine
     private var inputBus: AUAudioUnitBus!
     private var outputBus: AUAudioUnitBus!
     private var _inputBusses: AUAudioUnitBusArray!
     private var _outputBusses: AUAudioUnitBusArray!
+    /// Fixed address for the AU's lifetime: hosts may fetch the render block
+    /// before allocateRenderResources sizes the storage.
+    private let input: UnsafeMutablePointer<KFRenderInput> = {
+        let p = UnsafeMutablePointer<KFRenderInput>.allocate(capacity: 1)
+        p.initialize(to: KFRenderInput(maxFrames: 0, channelCount: 0, samples: nil,
+                                       bufferList: AudioBufferList.allocate(maximumBuffers: 2).unsafeMutablePointer))
+        return p
+    }()
 
     private static let stateKey = "KeyFinder"
 
@@ -32,6 +40,17 @@ public final class KeyDetectorAudioUnit: AUAudioUnit {
         maximumFramesToRender = 4096
     }
 
+    deinit {
+        // -[AUAudioUnit dealloc] runs after this body and calls our
+        // deallocateRenderResources if resources are still allocated, which
+        // would touch `input` after it is freed. Release them first.
+        if renderResourcesAllocated { deallocateRenderResources() }
+        input.pointee.samples?.deallocate()
+        free(input.pointee.bufferList)
+        input.deinitialize(count: 1)
+        input.deallocate()
+    }
+
     public override var inputBusses: AUAudioUnitBusArray { _inputBusses }
     public override var outputBusses: AUAudioUnitBusArray { _outputBusses }
     /// Mono→mono and stereo→stereo.
@@ -45,32 +64,29 @@ public final class KeyDetectorAudioUnit: AUAudioUnit {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudioUnitErr_FormatNotSupported))
         }
         try super.allocateRenderResources()
+        // Rendering is stopped here, so the render block can't see a half-updated buffer.
+        let channels = inputBus.format.channelCount
+        input.pointee.samples?.deallocate()
+        input.pointee.samples = .allocate(capacity: Int(channels) * Int(maximumFramesToRender))
+        input.pointee.channelCount = channels
+        input.pointee.maxFrames = maximumFramesToRender
         engine.prepare(sampleRate: outputBus.format.sampleRate)
     }
 
     public override func deallocateRenderResources() {
         engine.stop()
+        input.pointee.maxFrames = 0
+        input.pointee.samples?.deallocate()
+        input.pointee.samples = nil
         super.deallocateRenderResources()
     }
 
-    public override var internalRenderBlock: AUInternalRenderBlock {
-        // Capture only the raw pointer: no ARC traffic or Swift runtime calls
-        // on the realtime thread. `engine` (and so the analyzer) outlives
-        // rendering because this AU owns it.
-        let analyzer = engine.live.raw
-        return { _, timestamp, frameCount, _, outputData, _, pullInputBlock in
-            guard let pullInputBlock else { return kAudioUnitErr_NoConnection }
-            var pullFlags = AudioUnitRenderActionFlags()
-            let status = pullInputBlock(&pullFlags, timestamp, frameCount, 0, outputData)
-            guard status == noErr else { return status }
-
-            let buffers = UnsafeMutableAudioBufferListPointer(outputData)
-            guard buffers.count > 0, let left = buffers[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
-            let right = buffers.count > 1 ? buffers[1].mData?.assumingMemoryBound(to: Float.self) : nil
-            _ = kf_analyzer_push(analyzer, left, right.map { UnsafePointer($0) }, Int(frameCount))
-            return noErr
-        }
-    }
+    // The render block is KFMakeRenderBlock's, vended by KFAudioUnitBase so it
+    // never passes through Swift. It captures only these raw pointers;
+    // `engine` (and so the analyzer) and `input` outlive rendering because
+    // this AU owns them.
+    public override var renderInput: UnsafeMutablePointer<KFRenderInput> { input }
+    public override var renderAnalyzer: OpaquePointer { engine.live.raw }
 
     /// Saved in the Logic project: the selected mode and last detected key,
     /// so reopening a session shows the key without replaying it.

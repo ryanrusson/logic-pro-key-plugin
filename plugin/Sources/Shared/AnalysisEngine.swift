@@ -24,7 +24,8 @@ final class AnalysisEngine: ObservableObject {
     /// Fed by the Audio Unit's render block.
     let live: AnalyzerHandle
     private var file: AnalyzerHandle?
-    private var saved: KeyResult? // from the Logic project, shown until new audio arrives
+    private var fileRequest = 0 // bumped to discard superseded file analyses
+    private var saved: KeyResult? // from the Logic project, shown until live analysis finds a key
 
     private let queue = DispatchQueue(label: "KeyFinder.analysis", qos: .userInitiated)
     private var timer: DispatchSourceTimer? // accessed on `queue` only
@@ -77,24 +78,30 @@ final class AnalysisEngine: ObservableObject {
         queue.async { [weak self] in
             guard let self else { return }
             _ = kf_analyzer_process(self.live.raw) // applies the reset
-            DispatchQueue.main.async { self.showLive() }
+            DispatchQueue.main.async {
+                // A refresh queued before the reset applied may have saved the old key again.
+                self.saved = nil
+                self.withStateLock { self.savedResult = nil }
+                self.showLive()
+            }
         }
     }
 
     private func liveAudioArrived() {
-        saved = nil
         if source == .live { refresh() }
     }
 
     // MARK: File analysis
 
     func analyzeFile(at url: URL) {
+        fileRequest += 1
+        let request = fileRequest
         isAnalyzingFile = true
         fileError = nil
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let outcome = Result { try AnalyzerHandle.analyzing(fileAt: url) }
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.fileRequest == request else { return }
                 self.isAnalyzingFile = false
                 switch outcome {
                 case .success(let handle):
@@ -109,6 +116,8 @@ final class AnalysisEngine: ObservableObject {
     }
 
     func showLive() {
+        fileRequest += 1
+        isAnalyzingFile = false
         source = .live
         file = nil
         refresh()
@@ -121,10 +130,12 @@ final class AnalysisEngine: ObservableObject {
         case .file:
             result = file?.result(for: mode)
         case .live:
+            // Silence or a few unanalysed samples mustn't hide the saved key.
             let current = live.result(for: mode)
-            if current.secondsAnalyzed == 0, let saved {
+            if current.key == nil, let saved {
                 result = saved
             } else {
+                saved = nil
                 result = current
                 if current.key != nil { withStateLock { savedResult = current } }
             }
@@ -141,16 +152,19 @@ final class AnalysisEngine: ObservableObject {
         }
     }
 
+    /// Applies the persisted state at once, so a host that reads fullState
+    /// straight after setting it gets it back; the UI follows on main.
     func restore(_ d: [String: Any]) {
+        let restoredMode = (d["mode"] as? NSNumber).flatMap { SourceMode(rawValue: $0.uint32Value) }
+        let restoredResult = (d["lastResult"] as? [String: Any]).flatMap(KeyResult.init(dictionary:))
+        withStateLock {
+            if let restoredMode { savedMode = restoredMode }
+            savedResult = restoredResult
+        }
         DispatchQueue.main.async { [self] in
-            if let raw = (d["mode"] as? NSNumber)?.uint32Value, let m = SourceMode(rawValue: raw) {
-                mode = m
-            }
-            if let rd = d["lastResult"] as? [String: Any], let r = KeyResult(dictionary: rd) {
-                saved = r
-                withStateLock { savedResult = r }
-                refresh()
-            }
+            if let restoredMode { mode = restoredMode }
+            saved = restoredResult
+            refresh()
         }
     }
 
