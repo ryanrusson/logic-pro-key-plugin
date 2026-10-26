@@ -38,6 +38,7 @@ public final class KeyDetectorAudioUnit: KFAudioUnitBase {
         _inputBusses = AUAudioUnitBusArray(audioUnit: self, busType: .input, busses: [inputBus])
         _outputBusses = AUAudioUnitBusArray(audioUnit: self, busType: .output, busses: [outputBus])
         maximumFramesToRender = 4096
+        engine.onUserChange = { [weak self] in self?.stateChangedByUser() }
     }
 
     deinit {
@@ -87,6 +88,23 @@ public final class KeyDetectorAudioUnit: KFAudioUnitBase {
     // this AU owns them.
     public override var renderInput: UnsafeMutablePointer<KFRenderInput> { input }
     public override var renderAnalyzer: OpaquePointer { engine.live.raw }
+
+    /// Logic restores a project by setting fullStateForDocument, which sets
+    /// fullState in turn. With automatic KVO both sets were reported back to
+    /// Logic as changes made by the plug-in, so every project with KeyFinder
+    /// opened as modified. Only changes the user makes here are reported.
+    public override class func automaticallyNotifiesObservers(forKey key: String) -> Bool {
+        Self.stateKeyPaths.contains(key) ? false : super.automaticallyNotifiesObservers(forKey: key)
+    }
+
+    private static let stateKeyPaths: Set<String> = ["fullState", "fullStateForDocument"]
+
+    /// Tells the host the saved state changed (mode switch, Reset), so Logic
+    /// marks the project as modified and saves it.
+    private func stateChangedByUser() {
+        for key in Self.stateKeyPaths { willChangeValue(forKey: key) }
+        for key in Self.stateKeyPaths { didChangeValue(forKey: key) }
+    }
 
     /// Saved in the Logic project: the selected mode and last detected key,
     /// so reopening a session shows the key without replaying it.
