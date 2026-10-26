@@ -3,7 +3,7 @@
 //!
 //! Pipeline: stereo → mono → decimate to ~5.5 kHz → 8192-pt STFT → spectral
 //! peak picking → 10-cent pitch-class histogram → tuning estimate → 12-bin
-//! chroma → correlation with 24 key profiles.
+//! chroma → likelihood under 24 learned key profiles → calibrated posterior.
 
 pub mod analyzer;
 pub mod chroma;

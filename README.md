@@ -17,7 +17,7 @@ KeyFinder is an Audio Unit (AUv3) effect for Logic Pro. Insert it on a track, pl
    ├─ Guitar  E2–E6  peak picking ─┼─ 10¢                         chroma, mode picker
    └─ FullMix C2–C7  strict peaks ─┘  pitch histogram
    tuning estimate → 12-bin chroma
-   Krumhansl-Kessler + Temperley correlation → 24 keys, confidence
+   learned key profiles → 24-key posterior → calibrated confidence
 ```
 
 ## Why Swift + Rust (and not Go)
@@ -53,6 +53,8 @@ The way to get instant, no-playback analysis of a selected region is **ARA 2**, 
 1. Control-click the audio region › **Stem Splitter** (Logic Pro 11+). Choose Bass, and Guitar if your Logic version offers it.
 2. Insert KeyFinder on the **Bass** stem. Bass is usually the most reliable stem because it states the root. Use the Guitar/Other stem as a cross-check.
 3. Or skip splitting and use **Full Mix** mode. It's tuned to reject drums but is less reliable on dense mixes.
+
+Confidence is the estimated chance that the key is right. On Logic's Apple Loops, High (60% or more) is right about two times in three. Check the alternatives when confidence is Medium or Low: the relative and fifth-related keys are the usual near misses.
 
 The detected key and mode are saved in the Logic project, so reopening a session shows the key without replaying.
 
@@ -94,7 +96,40 @@ The accuracy suite renders chord progressions and bass lines in all 24 keys and 
 - a full mix with kick and hi-hat
 - that noise and silence don't produce a confident key
 
-To validate on real material, run `keyfind` over a folder of stems whose keys you already know.
+Synthetic audio says little about real recordings, so key accuracy is measured on real audio too (below).
+
+## Real-audio benchmark (Apple Loops, macOS)
+
+Logic's Apple Loops (`/Library/Audio/Apple Loops`, about 3,200 CAF files) carry a key label in their metadata. The benchmark runs every pitched, labelled loop through the plugin's own file path: AVFoundation decode in `AnalyzerHandle.swift`, then the Rust core.
+
+```sh
+scripts/bench-apple-loops.sh                        # writes core/target/bench/apple-loops.tsv and prints the scores
+scripts/bench-apple-loops.sh new.tsv old.tsv        # also compares with an earlier run, loop by loop
+python3 scripts/bench/train.py core/target/bench/apple-loops.tsv   # refit the key model
+```
+
+It needs Rust, the Command Line Tools and Logic's loop library (Logic › Settings › Sound Library). The script builds the core and a small `swiftc` harness (`scripts/bench/main.swift` with the plugin's `AnalyzerHandle.swift` and `KeyResult.swift`), then analyses the loops in 8 parallel shards, which takes about 7 s. `LOOPS` and `JOBS` override the folder and the shard count.
+
+Labels come from the CAF `info` and `uuid` chunks: `key signature` (the tonic), `key type` and `category`. Drums, Percussion and Sound Effect loops are skipped, as are loops with no usable key. That leaves 1,416 loops labelled major or minor and 292 labelled "both" (a riff that fits either), with a median length of 8 s. `scripts/bench/score.py` reports:
+
+- **exact**: the right tonic and major/minor.
+- **MIREX**: the weighted score as mir_eval defines it: 1 for exact, 0.5 for a fifth above, 0.3 for the relative key and 0.2 for the parallel key.
+- **tonic** and **both**: the right tonic, ignoring major/minor, for major/minor loops and for "both" loops.
+- **confidence calibration**: the share of loops shown as High (≥ 0.6), Medium and Low confidence, and how often each band is right.
+- **exact by category** (Bass, Guitars, Keyboards, Mixed, Other) and the **error intervals**: the detected tonic minus the labelled one, with the mode kept or flipped.
+- with a baseline, the change in each mode, with McNemar's z over the loops one run gets right and the other wrong. |z| < 2, or about 1–2 points of exact accuracy, is noise.
+
+Results (Auto mode, 1,416 major/minor loops):
+
+| | exact | MIREX | both (tonic) | High confidence: share of loops, right |
+|---|---|---|---|---|
+| Krumhansl-Kessler + Temperley, Auto = most confident mode | 36.8% | 0.470 | 53.8% | 58.5%, 45.4% |
+| Learned profiles, Auto = mean posterior | 44.4% | 0.538 | 63.4% | 10.9%, 65.2% |
+| same, two-fold cross-validation | 43.9% | 0.532 | 63.4% | 11.3%, 69.4% |
+
+The key profiles and calibration constants in `core/src/key.rs` are fitted to these loops. The cross-validated row (fitted on one half, scored on the other) is the accuracy to expect on loops the model hasn't seen. A leave-one-genre-out split gives about 42%. Loops are short and often state only a root and fifth, so many are ambiguous: a plain STFT chroma with the classical profiles also scored 33–36%. Accuracy doesn't improve past about 6 s of audio. Tried and dropped, because the benchmark didn't support them: suppressing odd harmonics, a lowest-note (bass) histogram as tonic evidence or as a separate expert, a bonus for the loudest pitch class, mixture profiles, and stronger or weaker peak compression.
+
+After changing the DSP, rerun the benchmark, then `train.py`. It prints the cross-validated scores and the refitted constants to paste into `key.rs`.
 
 ## Layout
 
@@ -103,14 +138,15 @@ core/                 Rust: keyfinder-core (staticlib + rlib)
   src/ring.rs         wait-free SPSC ring buffer (render thread → analysis)
   src/decimate.rs     windowed-sinc decimator to ~5.5 kHz
   src/chroma.rs       STFT, peak picking, tuning, chroma (per source mode)
-  src/key.rs          key profiles, 24-key ranking, confidence
-  src/analyzer.rs     threading model, parallel modes, Auto selection
+  src/key.rs          learned key profiles, 24-key posterior, calibrated confidence
+  src/analyzer.rs     threading model, parallel modes, Auto (modes combined)
   src/ffi.rs          C ABI  ↔  include/keyfinder.h (+ module.modulemap)
   src/bin/keyfind.rs  WAV command-line tool
 plugin/               Swift: XcodeGen project (container app + AUv3 extension)
   Sources/AudioUnit   AUAudioUnit subclass, Objective-C render block, AUViewController
   Sources/Shared      AnalysisEngine, KeyDetectorView, models (app + AU)
 scripts/build-core.sh universal static lib → KeyFinderCore.xcframework
+scripts/bench-apple-loops.sh  real-audio benchmark (bench/: harness, scoring, model fitting)
 ```
 
 ## Roadmap

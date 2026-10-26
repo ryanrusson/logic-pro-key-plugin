@@ -15,7 +15,7 @@ enum {
     KF_MODE_BASS = 0,     // isolated bass / bass stem
     KF_MODE_GUITAR = 1,   // isolated guitar / "other" stem
     KF_MODE_FULL_MIX = 2, // full mix, vocals
-    KF_MODE_AUTO = 3,     // most confident of the above (query only)
+    KF_MODE_AUTO = 3,     // the above combined (query only)
 };
 
 // All modes are analysed simultaneously; `mode` only selects which result
@@ -24,7 +24,7 @@ enum {
 typedef struct {
     int32_t tonic;    // pitch class, 0 = C
     int32_t is_minor;
-    float score;      // profile correlation, -1..1
+    float score;      // posterior probability, 0..1
 } KFKeyCandidate;
 
 typedef struct {
@@ -32,7 +32,7 @@ typedef struct {
     uint32_t mode;          // mode the result came from
     int32_t tonic;
     int32_t is_minor;
-    float confidence;       // 0..1
+    float confidence;       // 0..1, chance the key is right
     float tuning_cents;     // deviation from A440, -50..50
     float tonality;         // 0..1, how pitched the material is
     float seconds_analyzed;
