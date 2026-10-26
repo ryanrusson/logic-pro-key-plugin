@@ -53,9 +53,15 @@ fn fill(s: &Snapshot, out: &mut KFKeyResult) {
     }
 }
 
+/// Rates the decimator is designed for. Anything else (inf, absurd values)
+/// would overflow its filter length and abort the host.
+fn valid_rate(sample_rate: f64) -> bool {
+    sample_rate.is_finite() && (8000.0..=768_000.0).contains(&sample_rate)
+}
+
 #[no_mangle]
 pub extern "C" fn kf_analyzer_new(sample_rate: f64) -> *mut Analyzer {
-    if !sample_rate.is_finite() || sample_rate < 8000.0 {
+    if !valid_rate(sample_rate) {
         return std::ptr::null_mut();
     }
     Box::into_raw(Box::new(Analyzer::new(sample_rate)))
@@ -93,6 +99,17 @@ pub unsafe extern "C" fn kf_analyzer_process(a: *const Analyzer) -> usize {
     if a.is_null() { 0 } else { (*a).process() }
 }
 
+/// End of input for offline (file) analysis; never for live input.
+///
+/// # Safety
+/// `a` must be a live analyzer.
+#[no_mangle]
+pub unsafe extern "C" fn kf_analyzer_finish(a: *const Analyzer) {
+    if !a.is_null() {
+        (*a).finish();
+    }
+}
+
 /// # Safety
 /// `a` must be a live analyzer; `out` must be valid for writes.
 #[no_mangle]
@@ -104,7 +121,8 @@ pub unsafe extern "C" fn kf_analyzer_result(a: *const Analyzer, mode: u32, out: 
     (*out).has_key
 }
 
-/// Discard accumulated analysis. `sample_rate <= 0` keeps the current rate.
+/// Discard accumulated analysis. An unusable `sample_rate` (e.g. <= 0)
+/// keeps the current rate.
 ///
 /// # Safety
 /// `a` must be a live analyzer.
@@ -113,7 +131,7 @@ pub unsafe extern "C" fn kf_analyzer_reset(a: *const Analyzer, sample_rate: f64)
     if a.is_null() {
         return;
     }
-    (*a).request_reset((sample_rate >= 8000.0).then_some(sample_rate));
+    (*a).request_reset(valid_rate(sample_rate).then_some(sample_rate));
 }
 
 /// # Safety
@@ -138,7 +156,7 @@ pub unsafe extern "C" fn kf_analyzer_dropped_samples(a: *const Analyzer) -> u64 
 /// `mono` must point to `n` floats; `out` must be valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn kf_analyze_buffer(mono: *const f32, n: usize, sample_rate: f64, mode: u32, out: *mut KFKeyResult) -> i32 {
-    if mono.is_null() || out.is_null() || !sample_rate.is_finite() || sample_rate < 8000.0 {
+    if mono.is_null() || out.is_null() || !valid_rate(sample_rate) {
         return 0;
     }
     let s = analyze_buffer(std::slice::from_raw_parts(mono, n), sample_rate, Selection::from_u32(mode));

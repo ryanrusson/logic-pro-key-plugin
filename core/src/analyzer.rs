@@ -60,6 +60,13 @@ impl Engine {
         self.spectrum.process(&self.scratch_out, |f| modes.iter_mut().for_each(|m| m.add_frame(f)));
     }
 
+    /// End of input (offline analysis only): analyses a clip too short to
+    /// fill one frame.
+    pub fn finish(&mut self) {
+        let modes = &mut self.modes;
+        self.spectrum.finish(|f| modes.iter_mut().for_each(|m| m.add_frame(f)));
+    }
+
     fn snapshot_mode(&self, h: &PitchHistogram) -> Snapshot {
         let chroma = h.chroma();
         Snapshot {
@@ -125,8 +132,11 @@ impl Analyzer {
     }
 
     /// Realtime-safe. Downmixes to mono into the ring buffer.
+    ///
+    /// # Safety
+    /// Single producer: never call `push` from two threads at once.
     #[inline]
-    pub fn push(&self, left: &[f32], right: Option<&[f32]>) -> usize {
+    pub unsafe fn push(&self, left: &[f32], right: Option<&[f32]>) -> usize {
         if !self.listening.load(Ordering::Relaxed) {
             return 0;
         }
@@ -166,6 +176,13 @@ impl Analyzer {
         n
     }
 
+    /// End of input for offline (file) analysis: drains the ring, then
+    /// `Engine::finish`. Not for live input, where more audio may follow.
+    pub fn finish(&self) {
+        self.process();
+        self.engine.lock().unwrap_or_else(|e| e.into_inner()).finish();
+    }
+
     pub fn snapshot(&self, sel: Selection) -> Snapshot {
         self.engine.lock().unwrap_or_else(|e| e.into_inner()).snapshot(sel)
     }
@@ -181,5 +198,6 @@ pub fn analyze_buffer(mono: &[f32], sample_rate: f64, sel: Selection) -> Snapsho
     for chunk in mono.chunks(1 << 16) {
         e.feed(chunk);
     }
+    e.finish();
     e.snapshot(sel)
 }

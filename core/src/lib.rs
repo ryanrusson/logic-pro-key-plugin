@@ -10,7 +10,8 @@ pub mod chroma;
 pub mod decimate;
 pub mod ffi;
 pub mod key;
-pub mod ring;
+// Sound only with one producer and one consumer, which `Analyzer` enforces.
+mod ring;
 
 pub use analyzer::{analyze_buffer, Analyzer, Selection, Snapshot};
 pub use chroma::SourceMode;

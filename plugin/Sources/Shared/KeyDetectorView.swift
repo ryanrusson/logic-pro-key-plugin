@@ -68,8 +68,7 @@ struct KeyDetectorView: View {
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 Text("—").font(.system(size: 40, weight: .bold, design: .rounded))
-                Text(isStandalone ? "No file analysed yet." : "Play the track. A key appears after a few seconds of pitched audio.")
-                    .font(.callout).foregroundStyle(.secondary)
+                Text(emptyMessage).font(.callout).foregroundStyle(.secondary)
             }
             .frame(minHeight: 120, alignment: .topLeading)
         }
@@ -114,6 +113,11 @@ struct KeyDetectorView: View {
     }
 
     // MARK: Helpers
+
+    private var emptyMessage: String {
+        if case .file = engine.source { return "No key found. The file has too little pitched audio." }
+        return isStandalone ? "No file analysed yet." : "Play the track. A key appears after a few seconds of pitched audio."
+    }
 
     private func statusText(_ r: KeyResult) -> String {
         if r.isSaved { return "Saved with project" }

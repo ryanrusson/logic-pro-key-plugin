@@ -29,4 +29,6 @@ jobs:
           xcodebuild -project plugin/KeyFinder.xcodeproj -scheme KeyFinder
           -configuration Release -derivedDataPath plugin/build
           CODE_SIGNING_ALLOWED=NO build
+      # Keeps the Command Line Tools build in step with project.yml
+      - run: SKIP_CORE=1 ARCHS=arm64 scripts/build-plugin-clt.sh
       - run: make smoke
