@@ -15,8 +15,15 @@ final class AnalysisEngine: ObservableObject {
     @Published private(set) var isAnalyzingFile = false
     @Published private(set) var fileError: String?
     @Published var mode: SourceMode = .auto {
-        didSet { withStateLock { savedMode = mode }; refresh() }
+        didSet {
+            withStateLock { savedMode = mode }
+            refresh()
+            if !isRestoring { onUserChange?() }
+        }
     }
+    /// Called on main when the user changes what is saved with the project.
+    var onUserChange: (() -> Void)?
+    private var isRestoring = false
     @Published var isListening = true {
         didSet { kf_analyzer_set_listening(live.raw, isListening ? 1 : 0) }
     }
@@ -74,6 +81,7 @@ final class AnalysisEngine: ObservableObject {
     func reset() {
         saved = nil
         withStateLock { savedResult = nil }
+        onUserChange?()
         kf_analyzer_reset(live.raw, 0)
         queue.async { [weak self] in
             guard let self else { return }
@@ -162,7 +170,9 @@ final class AnalysisEngine: ObservableObject {
             savedResult = restoredResult
         }
         DispatchQueue.main.async { [self] in
+            isRestoring = true
             if let restoredMode { mode = restoredMode }
+            isRestoring = false
             saved = restoredResult
             refresh()
         }
