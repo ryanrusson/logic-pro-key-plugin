@@ -15,7 +15,7 @@ const RING_CAPACITY: usize = 1 << 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Selection {
     Mode(SourceMode),
-    /// Whichever mode is most confident.
+    /// All modes combined (see `key::combine`).
     Auto,
 }
 
@@ -71,7 +71,7 @@ impl Engine {
         let chroma = h.chroma();
         Snapshot {
             mode: h.mode(),
-            estimate: key::estimate(&chroma, h.tonality()),
+            estimate: key::estimate(&chroma, h.tonality(), h.mode()),
             chroma,
             tuning_cents: h.tuning() * 100.0,
             tonality: h.tonality(),
@@ -84,12 +84,17 @@ impl Engine {
         match sel {
             Selection::Mode(m) => self.snapshot_mode(&self.modes[m as usize]),
             Selection::Auto => {
-                let conf = |s: &Snapshot| s.estimate.as_ref().map_or(-1.0, |e| e.confidence);
-                self.modes
-                    .iter()
-                    .map(|h| self.snapshot_mode(h))
-                    .reduce(|best, s| if conf(&s) > conf(&best) { s } else { best })
-                    .expect("three modes")
+                let snaps = self.modes.each_ref().map(|h| self.snapshot_mode(h));
+                let parts: Vec<_> = snaps.iter().filter_map(|s| Some((s.estimate.as_ref()?, s.tonality))).collect();
+                let Some(combined) = key::combine(&parts) else {
+                    return snaps.into_iter().next().expect("three modes");
+                };
+                // Report the mode that most supports the combined winner.
+                let winner = combined.ranked[0].key.index();
+                let support = |s: &Snapshot| s.estimate.as_ref().map_or(-1.0, |e| e.posterior[winner]);
+                let mut best = snaps.into_iter().reduce(|a, b| if support(&b) > support(&a) { b } else { a }).expect("three modes");
+                best.estimate = Some(combined);
+                best
             }
         }
     }
