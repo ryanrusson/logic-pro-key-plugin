@@ -29,7 +29,8 @@ final class AnalyzerHandle {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
 
-        let file = try AVAudioFile(forReading: url)
+        // AVAudioFile's errors are bare OSStatus codes; report them in words.
+        guard let file = try? AVAudioFile(forReading: url) else { throw FileError.unsupported }
         let format = file.processingFormat // always deinterleaved Float32
         let chunk: AVAudioFrameCount = 1 << 16
         guard let handle = AnalyzerHandle(sampleRate: format.sampleRate),
@@ -37,12 +38,13 @@ final class AnalyzerHandle {
         else { throw FileError.unsupported }
 
         while file.framePosition < file.length {
-            try file.read(into: buffer, frameCount: chunk)
+            do { try file.read(into: buffer, frameCount: chunk) } catch { throw FileError.unsupported }
             guard buffer.frameLength > 0, let channels = buffer.floatChannelData else { break }
             let right: UnsafePointer<Float>? = format.channelCount > 1 ? UnsafePointer(channels[1]) : nil
             _ = kf_analyzer_push(handle.raw, channels[0], right, Int(buffer.frameLength))
             _ = kf_analyzer_process(handle.raw)
         }
+        kf_analyzer_finish(handle.raw)
         return handle
     }
 }

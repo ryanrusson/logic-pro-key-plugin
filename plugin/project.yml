@@ -31,6 +31,9 @@ targets:
       path: Generated/App-Info.plist
       properties:
         CFBundleDisplayName: KeyFinder
+        # XcodeGen writes 1.0 / 1 unless these reference the build settings.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSApplicationCategoryType: public.app-category.music
         LSMinimumSystemVersion: "13.0"
     entitlements:
@@ -58,6 +61,8 @@ targets:
       path: Generated/AU-Info.plist
       properties:
         CFBundleDisplayName: KeyFinder
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.AudioUnit-UI
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).AudioUnitViewController

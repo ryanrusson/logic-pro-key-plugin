@@ -51,11 +51,15 @@ size_t kf_analyzer_push(const KFAnalyzer *a, const float *left, const float *rig
 // Background thread: drain buffered audio and update the analysis.
 size_t kf_analyzer_process(const KFAnalyzer *a);
 
+// Offline (file) analysis only, once after the last push: drains the buffer
+// and analyses a clip too short to fill one analysis frame (~1.5 s).
+void kf_analyzer_finish(const KFAnalyzer *a);
+
 // Any non-realtime thread. Returns has_key.
 int32_t kf_analyzer_result(const KFAnalyzer *a, uint32_t mode, KFKeyResult *out);
 
-// Applied on the next kf_analyzer_process. sample_rate <= 0 keeps the
-// current rate.
+// Applied on the next kf_analyzer_process. A sample_rate outside
+// 8 kHz..768 kHz (e.g. <= 0) keeps the current rate.
 void kf_analyzer_reset(const KFAnalyzer *a, double sample_rate);
 void kf_analyzer_set_listening(const KFAnalyzer *a, int32_t on);
 uint64_t kf_analyzer_dropped_samples(const KFAnalyzer *a);

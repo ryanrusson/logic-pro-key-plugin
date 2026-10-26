@@ -14,6 +14,8 @@ pub const HOP: usize = 2048;
 pub const BINS_PER_SEMITONE: usize = 10;
 pub const HIST_BINS: usize = 12 * BINS_PER_SEMITONE;
 const MAX_PEAKS: usize = 48;
+/// Width, in semitones, of the band-edge tapers.
+const EDGE: f32 = 6.0;
 const SILENCE_RMS: f32 = 1e-3; // -60 dBFS
 
 /// Which part of the spectrum to trust, tuned for the source material.
@@ -44,19 +46,21 @@ impl SourceMode {
         }
     }
 
-    /// Relative weight of a peak at MIDI pitch `p`. A raised-cosine taper at
-    /// the edges avoids hard cut-offs; bass mode favours the low register
-    /// where the root normally lives.
+    /// Relative weight of a peak at MIDI pitch `p`. Raised-cosine tapers
+    /// avoid hard cut-offs. The low one sits below the band, so the lowest
+    /// notes (a bass's open E1) keep full weight. The high one stays inside:
+    /// widening it lets the 5th harmonic of low roots (a major third) in and
+    /// turns minor keys major. Bass mode favours the low register where the
+    /// root normally lives.
     fn weight(self, p: f32) -> f32 {
         let (lo, hi, _) = self.params();
-        if p < lo || p > hi {
+        if p < lo - EDGE || p > hi {
             return 0.0;
         }
-        let edge = 6.0;
-        let taper = |d: f32| if d >= edge { 1.0 } else { 0.5 - 0.5 * (std::f32::consts::PI * d / edge).cos() };
-        let w = taper(p - lo) * taper(hi - p);
+        let taper = |d: f32| if d >= EDGE { 1.0 } else { 0.5 - 0.5 * (std::f32::consts::PI * d / EDGE).cos() };
+        let w = taper(p - (lo - EDGE)) * taper(hi - p);
         match self {
-            Self::Bass => w * (1.0 - 0.5 * (p - lo) / (hi - lo)),
+            Self::Bass => w * (1.0 - 0.5 * ((p - lo) / (hi - lo)).clamp(0.0, 1.0)),
             _ => w,
         }
     }
@@ -119,6 +123,22 @@ impl SpectrumFrames {
         self.pending.drain(..start);
     }
 
+    /// End of input, for offline analysis only: a clip too short to fill a
+    /// single frame is analysed zero-padded, centred so the window doesn't
+    /// suppress it.
+    pub fn finish(&mut self, mut on_frame: impl FnMut(&Frame)) {
+        if self.frames > 0 || self.pending.is_empty() {
+            return;
+        }
+        let pad = (FFT_SIZE - self.pending.len()) / 2;
+        self.pending.splice(0..0, std::iter::repeat_n(0.0, pad));
+        self.pending.resize(FFT_SIZE, 0.0);
+        if self.analyze(0) {
+            on_frame(&Frame { mag: &self.mag, prefix: &self.prefix, bin_hz: self.rate / FFT_SIZE as f32 });
+        }
+        self.pending.clear();
+    }
+
     fn analyze(&mut self, start: usize) -> bool {
         self.frames += 1;
         let src = &self.pending[start..start + FFT_SIZE];
@@ -151,11 +171,21 @@ pub struct PitchHistogram {
     /// Pitch-class energy at 10-cent resolution, accumulated over all frames.
     pub histogram: [f64; HIST_BINS],
     pub voiced_frames: u64,
+    /// Sum and sum of squares of peak weights, for the effective peak count.
+    weight_sum: f64,
+    weight_sq_sum: f64,
 }
 
 impl PitchHistogram {
     pub fn new(mode: SourceMode) -> Self {
-        Self { mode, peaks: Vec::with_capacity(256), histogram: [0.0; HIST_BINS], voiced_frames: 0 }
+        Self {
+            mode,
+            peaks: Vec::with_capacity(256),
+            histogram: [0.0; HIST_BINS],
+            voiced_frames: 0,
+            weight_sum: 0.0,
+            weight_sq_sum: 0.0,
+        }
     }
 
     pub fn mode(&self) -> SourceMode {
@@ -165,7 +195,7 @@ impl PitchHistogram {
     pub fn add_frame(&mut self, f: &Frame) {
         let mag = f.mag;
         let (lo, hi, ratio) = self.mode.params();
-        let k_lo = ((midi_to_hz(lo - 1.0) / f.bin_hz) as usize).max(2);
+        let k_lo = ((midi_to_hz(lo - EDGE - 1.0) / f.bin_hz) as usize).max(2);
         let k_hi = ((midi_to_hz(hi + 1.0) / f.bin_hz) as usize).min(mag.len() - 3);
         if k_lo >= k_hi {
             return;
@@ -218,6 +248,8 @@ impl PitchHistogram {
             let frac = (pos - pos.floor()) as f64;
             self.histogram[i0] += w * (1.0 - frac);
             self.histogram[(i0 + 1) % HIST_BINS] += w * frac;
+            self.weight_sum += w;
+            self.weight_sq_sum += w * w;
         }
         self.voiced_frames += 1;
     }
@@ -230,8 +262,28 @@ impl PitchHistogram {
 
     /// How tightly spectral peaks cluster on a 12-TET grid: ~1 for pitched
     /// instruments, near 0 for noise. Used to gate key confidence.
+    ///
+    /// The resultant length of n random angles is about 1/sqrt(n), so a few
+    /// dozen noise peaks would read as tonal. With n the number of
+    /// independent peaks (effective count of weighted peaks, divided by the
+    /// frame overlap, since each peak shows up in up to FFT_SIZE/HOP
+    /// frames), the length is bias-corrected and scaled down unless the
+    /// Rayleigh statistic n·r² (≈1 for noise) shows the clustering is
+    /// significant.
     pub fn tonality(&self) -> f32 {
-        self.tuning_vector().1
+        if self.weight_sq_sum <= 0.0 {
+            return 0.0;
+        }
+        let r = self.tuning_vector().1 as f64;
+        let overlap = ((FFT_SIZE / HOP) as u64).min(self.voiced_frames.max(1)) as f64;
+        let n = self.weight_sum * self.weight_sum / self.weight_sq_sum / overlap;
+        if n <= 1.0 {
+            return 0.0;
+        }
+        let z = n * r * r;
+        let corrected = ((z - 1.0) / (n - 1.0)).max(0.0).sqrt();
+        let significance = ((z - 4.0) / 4.0).clamp(0.0, 1.0);
+        (corrected * significance) as f32
     }
 
     fn tuning_vector(&self) -> (f32, f32) {

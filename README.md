@@ -66,6 +66,19 @@ open plugin/build/Build/Products/Release/KeyFinder.app   # registers the AU
 
 Launch the app once so macOS registers the extension, then rescan in Logic (Settings › Plug-in Manager). To validate the AU: `auval -v aufx kyDt KyFn`. Builds are signed to run locally. Set `DEVELOPMENT_TEAM` in `plugin/project.yml` before distributing.
 
+On a fresh Xcode install, accept the license first (`sudo xcodebuild -license accept`, then `sudo xcodebuild -runFirstLaunch`). Otherwise every `xcrun`, `xcodebuild` and Homebrew build fails.
+
+**Without Xcode.** With only the Command Line Tools (`xcode-select --install`), `make build-clt` builds the same universal, ad-hoc signed app with `swiftc` into `plugin/build/clt/KeyFinder.app`. It needs no XcodeGen. It generates the Info.plists and entitlements from `plugin/project.yml`, so keep that file the single source of truth.
+
+**Registering and validating without launching the app:**
+
+```sh
+make auval                                   # registers the Xcode build, then auval -strict
+make auval APP=plugin/build/clt/KeyFinder.app   # same for the Command Line Tools build
+```
+
+`make register` first unregisters any other copy of the extension. Both builds share a bundle identifier, and with two copies registered, macOS picks one of them unpredictably.
+
 ## Testing the core (any OS)
 
 ```sh

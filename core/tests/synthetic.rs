@@ -161,13 +161,37 @@ fn full_mix_with_drums() {
 }
 
 #[test]
+fn low_e_string_riff_counts_its_root() {
+    // E2 is the bottom of Guitar mode's band; tapering inside the band used
+    // to zero it and the riff read as B minor.
+    let riff: Vec<(&[i32], i32)> = [40, 52, 50, 47, 45, 43, 42, 40].iter().map(|n| (std::slice::from_ref(n), 0)).collect();
+    let (k, _, _) = detect(&render(&riff, 4, 0.0, true, false), SourceMode::Guitar);
+    assert_eq!(k.name(), "E minor");
+}
+
+#[test]
 fn noise_and_silence_have_no_confident_key() {
     assert!(analyze_buffer(&vec![0.0; SR as usize * 5], SR, Selection::Auto).estimate.is_none());
-    let mut rng = Lcg(7);
-    let noise: Vec<f32> = (0..SR as usize * 10).map(|_| 0.3 * rng.next()).collect();
-    if let Some(e) = analyze_buffer(&noise, SR, Selection::Auto).estimate {
-        assert!(e.confidence < 0.3, "noise confidence {}", e.confidence);
+    // Many seeds and lengths: a few dozen random peaks used to look tonal.
+    for seed in 0..40 {
+        for secs in [4, 10] {
+            let mut rng = Lcg(seed);
+            let noise: Vec<f32> = (0..SR as usize * secs).map(|_| 0.3 * rng.next()).collect();
+            if let Some(e) = analyze_buffer(&noise, SR, Selection::Auto).estimate {
+                assert!(e.confidence < 0.3, "seed {seed}, {secs} s: noise confidence {}", e.confidence);
+            }
+        }
     }
+}
+
+#[test]
+fn clip_shorter_than_one_frame() {
+    // 1 s is less than one 8192-sample frame at the ~5.5 kHz analysis rate.
+    let chord: &[(&[i32], i32)] = &[(&[45, 57, 60, 64], 0)];
+    let buf = render(chord, 1, 0.0, true, false);
+    let (k, conf, _) = detect(&buf[..SR as usize], SourceMode::Guitar);
+    assert_eq!(k.name(), "A minor");
+    assert!(conf > 0.2, "confidence {conf}");
 }
 
 #[test]
@@ -178,7 +202,8 @@ fn streaming_matches_offline_and_reset_clears() {
     a.request_reset(Some(SR));
     a.process();
     for (l, r) in left.chunks(512).zip(right.chunks(512)) {
-        a.push(l, Some(r));
+        // Safety: this thread is the only producer.
+        unsafe { a.push(l, Some(r)) };
         a.process();
     }
     for sel in [Selection::Mode(SourceMode::Bass), Selection::Mode(SourceMode::Guitar), Selection::Auto] {

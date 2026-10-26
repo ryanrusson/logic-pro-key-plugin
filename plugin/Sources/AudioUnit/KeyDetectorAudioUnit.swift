@@ -2,6 +2,16 @@ import AudioToolbox
 import AVFoundation
 import KeyFinderCore
 
+/// Input buffers the render block pulls into. AURenderPullInputBlock needs
+/// caller-owned buffers, and the host's output buffers may have NULL mData
+/// (in-place request), so they can't be used for the pull.
+private struct RenderInput {
+    var maxFrames: AUAudioFrameCount = 0
+    var channelCount = 0
+    var samples: UnsafeMutablePointer<Float>? // planar, channelCount * maxFrames
+    let bufferList = AudioBufferList.allocate(maximumBuffers: 2)
+}
+
 /// Pass-through audio effect that listens to its track and estimates the key.
 /// Audio is untouched; the render block only copies samples into the Rust
 /// core's wait-free ring buffer.
@@ -11,6 +21,13 @@ public final class KeyDetectorAudioUnit: AUAudioUnit {
     private var outputBus: AUAudioUnitBus!
     private var _inputBusses: AUAudioUnitBusArray!
     private var _outputBusses: AUAudioUnitBusArray!
+    /// Fixed address for the AU's lifetime: hosts may fetch the render block
+    /// before allocateRenderResources sizes the storage.
+    private let input: UnsafeMutablePointer<RenderInput> = {
+        let p = UnsafeMutablePointer<RenderInput>.allocate(capacity: 1)
+        p.initialize(to: RenderInput())
+        return p
+    }()
 
     private static let stateKey = "KeyFinder"
 
@@ -32,6 +49,17 @@ public final class KeyDetectorAudioUnit: AUAudioUnit {
         maximumFramesToRender = 4096
     }
 
+    deinit {
+        // -[AUAudioUnit dealloc] runs after this body and calls our
+        // deallocateRenderResources if resources are still allocated, which
+        // would touch `input` after it is freed. Release them first.
+        if renderResourcesAllocated { deallocateRenderResources() }
+        input.pointee.samples?.deallocate()
+        free(input.pointee.bufferList.unsafeMutablePointer)
+        input.deinitialize(count: 1)
+        input.deallocate()
+    }
+
     public override var inputBusses: AUAudioUnitBusArray { _inputBusses }
     public override var outputBusses: AUAudioUnitBusArray { _outputBusses }
     /// Mono→mono and stereo→stereo.
@@ -45,28 +73,65 @@ public final class KeyDetectorAudioUnit: AUAudioUnit {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudioUnitErr_FormatNotSupported))
         }
         try super.allocateRenderResources()
+        // Rendering is stopped here, so the render block can't see a half-updated buffer.
+        let channels = Int(inputBus.format.channelCount)
+        input.pointee.samples?.deallocate()
+        input.pointee.samples = .allocate(capacity: channels * Int(maximumFramesToRender))
+        input.pointee.channelCount = channels
+        input.pointee.maxFrames = maximumFramesToRender
         engine.prepare(sampleRate: outputBus.format.sampleRate)
     }
 
     public override func deallocateRenderResources() {
         engine.stop()
+        input.pointee.maxFrames = 0
+        input.pointee.samples?.deallocate()
+        input.pointee.samples = nil
         super.deallocateRenderResources()
     }
 
     public override var internalRenderBlock: AUInternalRenderBlock {
-        // Capture only the raw pointer: no ARC traffic or Swift runtime calls
-        // on the realtime thread. `engine` (and so the analyzer) outlives
-        // rendering because this AU owns it.
+        // Capture only raw pointers, so the body does no ARC, locking or
+        // allocation. `engine` (and so the analyzer) and `input` outlive
+        // rendering because this AU owns them. Swift still bridges the host's
+        // pullInputBlock into a closure on every call (a small malloc/free
+        // plus refcounting); only a render block written in C/ObjC avoids that.
         let analyzer = engine.live.raw
+        let input = self.input
         return { _, timestamp, frameCount, _, outputData, _, pullInputBlock in
+            let state = input.pointee
+            guard frameCount <= state.maxFrames, let samples = state.samples else {
+                return kAudioUnitErr_TooManyFramesToProcess
+            }
             guard let pullInputBlock else { return kAudioUnitErr_NoConnection }
+
+            // Point the input list at our storage every cycle: the previous
+            // pull may have replaced mData with upstream's own buffers.
+            let byteSize = frameCount * UInt32(MemoryLayout<Float>.size)
+            let inBuffers = state.bufferList
+            inBuffers.count = state.channelCount
+            for ch in 0..<state.channelCount {
+                inBuffers[ch] = AudioBuffer(mNumberChannels: 1, mDataByteSize: byteSize,
+                                            mData: samples + ch * Int(state.maxFrames))
+            }
             var pullFlags = AudioUnitRenderActionFlags()
-            let status = pullInputBlock(&pullFlags, timestamp, frameCount, 0, outputData)
+            let status = pullInputBlock(&pullFlags, timestamp, frameCount, 0, inBuffers.unsafeMutablePointer)
             guard status == noErr else { return status }
 
-            let buffers = UnsafeMutableAudioBufferListPointer(outputData)
-            guard buffers.count > 0, let left = buffers[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
-            let right = buffers.count > 1 ? buffers[1].mData?.assumingMemoryBound(to: Float.self) : nil
+            // Pass through: in place when the host asked for it (NULL mData), else copy.
+            let outBuffers = UnsafeMutableAudioBufferListPointer(outputData)
+            for ch in 0..<min(outBuffers.count, inBuffers.count) {
+                guard let src = inBuffers[ch].mData else { return kAudioUnitErr_NoConnection }
+                if let dst = outBuffers[ch].mData {
+                    if dst != src { memcpy(dst, src, Int(byteSize)) }
+                } else {
+                    outBuffers[ch].mData = src
+                }
+                outBuffers[ch].mDataByteSize = byteSize
+            }
+
+            guard let left = inBuffers[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
+            let right = inBuffers.count > 1 ? inBuffers[1].mData?.assumingMemoryBound(to: Float.self) : nil
             _ = kf_analyzer_push(analyzer, left, right.map { UnsafePointer($0) }, Int(frameCount))
             return noErr
         }
