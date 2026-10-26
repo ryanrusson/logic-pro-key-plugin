@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds KeyFinder.app and its AUv3 extension with only the Xcode Command Line
-# Tools (swiftc, lipo, codesign): no Xcode, no XcodeGen. Info.plists and
+# Tools (swiftc, clang, lipo, codesign): no Xcode, no XcodeGen. Info.plists and
 # entitlements are generated from plugin/project.yml, so the spec stays the
 # single source of truth. Signed ad hoc ("Sign to Run Locally").
 #
@@ -18,7 +18,8 @@ SDK=$(xcrun --sdk macosx --show-sdk-path)
 
 rm -rf "$OUT" && mkdir -p "$GEN"
 
-# One line per target: name, type, product, deployment target, source dirs.
+# One line per target: name, type, product, deployment target, source dirs,
+# bridging header (may be empty).
 TARGETS=$(/usr/bin/ruby -ryaml -rjson - "$GEN" <<'RUBY'
 spec = YAML.load_file("plugin/project.yml")
 base = spec.dig("settings", "base") || {}
@@ -45,24 +46,38 @@ spec["targets"].each do |name, t|
   json = JSON.generate(info).gsub(/\$\((\w+)\)/) { vars.fetch($1) { abort "#{name}: unknown build setting $(#{$1})" }.to_s }
   File.write("#{ARGV[0]}/#{product}-Info.json", json)
   File.write("#{ARGV[0]}/#{product}.entitlements.json", JSON.generate(t.dig("entitlements", "properties") || {}))
-  puts [name, t["type"], product, macos, t["sources"].join(",")].join("\t")
+  puts [name, t["type"], product, macos, t["sources"].join(","), s["SWIFT_OBJC_BRIDGING_HEADER"]].join("\t")
 end
 RUBY
 )
 
-# compile <product> <deployment target> <source dirs> [swiftc flags...]
+# compile <product> <deployment target> <source dirs> <bridging header> [swiftc flags...]
 compile() {
-    local product=$1 macos=$2 dirs=$3; shift 3
-    local srcs=() slices=() d arch
-    for d in ${dirs//,/ }; do srcs+=(plugin/"$d"/*.swift); done
-    local opt=(-O -wmo)
-    [ "$CONFIG" = debug ] && opt=(-Onone -g)
+    local product=$1 macos=$2 dirs=$3 header=$4; shift 4
+    local srcs=() objc=() slices=() d f arch
+    for d in ${dirs//,/ }; do
+        srcs+=(plugin/"$d"/*.swift)
+        for f in plugin/"$d"/*.m; do [ -e "$f" ] || continue; objc+=("$f"); done
+    done
+    local opt=(-O -wmo) copt=(-O2)
+    [ "$CONFIG" = debug ] && opt=(-Onone -g) copt=(-O0 -g)
+    [ -n "$header" ] && set -- "$@" -import-objc-header "plugin/$header"
+    # Objective-C sources get the same extension-only API check as Swift.
+    [[ " $* " == *" -application-extension "* ]] && copt+=(-fapplication-extension)
     for arch in "${ARCHS[@]}"; do
+        local objs=() obj
+        for f in ${objc[@]+"${objc[@]}"}; do
+            echo "clang $(basename "$f") ($arch)"
+            obj=$GEN/$product-$arch-$(basename "${f%.m}").o
+            xcrun clang -c "${copt[@]}" -fobjc-arc -fmodules -Wall \
+                -target "$arch-apple-macos$macos" -isysroot "$SDK" -I core/include "$f" -o "$obj"
+            objs+=("$obj")
+        done
         echo "swiftc $product ($arch)"
         xcrun swiftc "${opt[@]}" -swift-version 5 -parse-as-library \
             -target "$arch-apple-macos$macos" -sdk "$SDK" -module-name "$product" \
             -I core/include -L core/build/universal -lkeyfinder_core -Xlinker -dead_strip \
-            "$@" "${srcs[@]}" -o "$GEN/$product-$arch"
+            "$@" "${srcs[@]}" ${objs[@]+"${objs[@]}"} -o "$GEN/$product-$arch"
         slices+=("$GEN/$product-$arch")
     done
     lipo -create "${slices[@]}" -output "$GEN/$product"
@@ -79,14 +94,14 @@ bundle() {
 sign() { codesign --force --sign - --options runtime --timestamp=none --entitlements "$GEN/$1.entitlements" "$2"; }
 
 APP= APPEX=
-while IFS=$'\t' read -r name type product macos dirs; do
+while IFS=$'\t' read -r name type product macos dirs header; do
     case $type in
         app-extension)
-            compile "$product" "$macos" "$dirs" -application-extension \
+            compile "$product" "$macos" "$dirs" "$header" -application-extension \
                 -Xlinker -application_extension -Xlinker -e -Xlinker _NSExtensionMain
             APPEX=$product ;;
         application)
-            compile "$product" "$macos" "$dirs"
+            compile "$product" "$macos" "$dirs" "$header"
             APP=$product ;;
         *) echo "unsupported target type $type ($name)" >&2; exit 1 ;;
     esac

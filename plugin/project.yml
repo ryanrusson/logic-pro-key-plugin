@@ -85,6 +85,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ryanrusson.keyfinder.audiounit
         PRODUCT_NAME: KeyFinderAU
+        # The render path is Objective-C; see RenderBlock.h.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/AudioUnit/RenderBlock.h
 
 schemes:
   KeyFinder:

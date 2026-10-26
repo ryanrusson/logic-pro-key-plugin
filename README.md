@@ -10,8 +10,8 @@ KeyFinder is an Audio Unit (AUv3) effect for Logic Pro. Insert it on a track, pl
                ▼
    Rust core (static lib, C ABI)            Swift (AUv3 + SwiftUI)
    ───────────────────────────              ────────────────────────────
-   SPSC ring buffer (no locks/allocs)       KeyDetectorAudioUnit  render block,
-   stereo → mono → FIR decimate ~5.5 kHz                          state save/restore
+   SPSC ring buffer (no locks/allocs)       RenderBlock.m         render block (ObjC)
+   stereo → mono → FIR decimate ~5.5 kHz    KeyDetectorAudioUnit  state save/restore
    8192-pt STFT (one FFT, shared)           AnalysisEngine        100 ms drain timer
    ├─ Bass    E1–G4  peak picking ─┐        KeyDetectorView       key, confidence,
    ├─ Guitar  E2–E6  peak picking ─┼─ 10¢                         chroma, mode picker
@@ -25,6 +25,7 @@ KeyFinder is an Audio Unit (AUv3) effect for Logic Pro. Insert it on a track, pl
 | Layer | Language | Reason |
 |---|---|---|
 | AUv3 extension, UI, Logic state | **Swift** | AUv3 is an Objective-C/Swift API, and SwiftUI is native. |
+| Render block | **Objective-C** | Swift converts the host's pull-input block to a closure on every render call, which allocates. The Objective-C block only calls the pull block, `memcpy` and the core. |
 | DSP, ring buffer, key model | **Rust** | No garbage collector or runtime, predictable latency, `#[no_mangle]` C ABI that Swift imports as a module, and testable on any OS. |
 | — | ~~Go~~ | Go isn't a good fit inside an audio plugin. Its garbage collector and goroutine scheduler would run inside Logic's process, cgo calls cost too much for per-buffer work, and two Go-built plugins can't share one process. Go would only make sense for separate helper tools, and this project doesn't need any. |
 
@@ -68,7 +69,7 @@ Launch the app once so macOS registers the extension, then rescan in Logic (Sett
 
 On a fresh Xcode install, accept the license first (`sudo xcodebuild -license accept`, then `sudo xcodebuild -runFirstLaunch`). Otherwise every `xcrun`, `xcodebuild` and Homebrew build fails.
 
-**Without Xcode.** With only the Command Line Tools (`xcode-select --install`), `make build-clt` builds the same universal, ad-hoc signed app with `swiftc` into `plugin/build/clt/KeyFinder.app`. It needs no XcodeGen. It generates the Info.plists and entitlements from `plugin/project.yml`, so keep that file the single source of truth.
+**Without Xcode.** With only the Command Line Tools (`xcode-select --install`), `make build-clt` builds the same universal, ad-hoc signed app with `swiftc` and `clang` into `plugin/build/clt/KeyFinder.app`. It needs no XcodeGen. It generates the Info.plists and entitlements from `plugin/project.yml`, so keep that file the single source of truth.
 
 **Registering and validating without launching the app:**
 
@@ -107,7 +108,7 @@ core/                 Rust: keyfinder-core (staticlib + rlib)
   src/ffi.rs          C ABI  ↔  include/keyfinder.h (+ module.modulemap)
   src/bin/keyfind.rs  WAV command-line tool
 plugin/               Swift: XcodeGen project (container app + AUv3 extension)
-  Sources/AudioUnit   AUAudioUnit subclass, AUViewController
+  Sources/AudioUnit   AUAudioUnit subclass, Objective-C render block, AUViewController
   Sources/Shared      AnalysisEngine, KeyDetectorView, models (app + AU)
 scripts/build-core.sh universal static lib → KeyFinderCore.xcframework
 ```
